@@ -1,0 +1,23 @@
+{
+  "name": "authoritygraph",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only authority and permission analysis for Solana protocols",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c blue,green \"npm run dev -w @authoritygraph/api\" \"npm run dev -w @authoritygraph/web\"",
+    "build": "npm run build -w @authoritygraph/api && npm run build -w @authoritygraph/web",
+    "typecheck": "npm run typecheck -w @authoritygraph/api && npm run typecheck -w @authoritygraph/web",
+    "test": "npm run test -w @authoritygraph/api && npm run test -w @authoritygraph/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

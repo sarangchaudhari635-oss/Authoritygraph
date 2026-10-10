@@ -3,18 +3,17 @@ import {
   Connection,
   PublicKey
 } from "@solana/web3.js";
-import {
-  TOKEN_PROGRAM_ID,
-  MintLayout
-} from "@solana/spl-token";
+import { MintLayout } from "@solana/spl-token";
+import type { Finding, AnalysisResponse } from "./types.js";
+import { config } from "./config.js";
 
-// Token-2022 program ID (hardcoded since spl-token v0.1.8 doesn't export it)
+// ── Program IDs constructed from web3.js v3 PublicKey (not spl-token's bundled v1 copy)
+// This avoids the cross-version PublicKey.equals() crash (audit finding B-2).
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 
 // BPF Upgradeable Loader program ID (via LoaderV3Program in web3.js v3)
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = LoaderV3Program.programId;
-import type { Finding, AnalysisResponse } from "./types.js";
-import { config } from "./config.js";
 
 export const connection = new Connection(config.rpcUrl, {
   commitment: "confirmed",
@@ -60,7 +59,12 @@ function baseResponse(address: string, kind: AnalysisResponse["kind"]): Analysis
   };
 }
 
-function decodePubkey(data: Buffer, start: number): string {
+/**
+ * Decode a 32-byte public key from a Buffer at the given byte offset.
+ * Accepts Uint8Array (web3.js v3 returns Uint8Array from RPC) — wrap
+ * in Buffer.from() before calling if you need readUInt32LE etc.
+ */
+function decodePubkey(data: Uint8Array, start: number): string {
   if (data.length < start + 32) throw new Error("Account data too short to decode public key");
   return new PublicKey(data.subarray(start, start + 32)).toBase58();
 }
@@ -103,19 +107,25 @@ async function analyzeProgram(address: string): Promise<AnalysisResponse> {
     return response;
   }
 
-  // UpgradeableLoaderState::Program is enum variant 2, followed by a 32-byte ProgramData address.
-  // Fail closed if the observed layout differs from the expected layout.
-  if (info.data.length < 36 || info.data.readUInt32LE(0) !== 2) {
+  // UpgradeableLoaderState::Program is enum variant 2 (4-byte LE u32), followed by a 32-byte ProgramData address.
+  // Wrap Uint8Array → Buffer so readUInt32LE() is available (audit finding B-1).
+  const data = Buffer.from(info.data.buffer, info.data.byteOffset, info.data.byteLength);
+  if (data.length < 36 || data.readUInt32LE(0) !== 2) {
     response.result = "unsupported";
     response.summary = "The program account data did not match the expected upgradeable-loader layout.";
     response.warnings.push("No authority conclusion was made because the loader data could not be decoded safely.");
     return response;
   }
 
-  const programDataAddress = decodePubkey(info.data, 4);
+  const programDataAddress = decodePubkey(data, 4);
   const programDataInfo = await connection.getAccountInfo(new PublicKey(programDataAddress), "confirmed");
 
-  if (!programDataInfo || programDataInfo.data.length < 13 || programDataInfo.data.readUInt32LE(0) !== 3) {
+  // Wrap ProgramData account data similarly.
+  const pdData = programDataInfo
+    ? Buffer.from(programDataInfo.data.buffer, programDataInfo.data.byteOffset, programDataInfo.data.byteLength)
+    : null;
+
+  if (!pdData || pdData.length < 13 || pdData.readUInt32LE(0) !== 3) {
     response.result = "unsupported";
     response.summary = "The ProgramData account could not be decoded using the expected loader layout.";
     response.warnings.push("No authority conclusion was made because ProgramData evidence was incomplete.");
@@ -123,8 +133,8 @@ async function analyzeProgram(address: string): Promise<AnalysisResponse> {
   }
 
   // UpgradeableLoaderState::ProgramData: enum tag (4 bytes), slot (8 bytes), Option<Pubkey>.
-  const deploymentSlot = programDataInfo.data.readBigUInt64LE(4).toString();
-  const optionTag = programDataInfo.data[12];
+  const deploymentSlot = pdData.readBigUInt64LE(4).toString();
+  const optionTag = pdData[12];
 
   if (optionTag === 0) {
     response.findings.push(finding(
@@ -135,8 +145,8 @@ async function analyzeProgram(address: string): Promise<AnalysisResponse> {
       "Keep deployment and source-verification evidence with the release record.",
       programDataAddress
     ));
-  } else if (optionTag === 1 && programDataInfo.data.length >= 45) {
-    const authority = decodePubkey(programDataInfo.data, 13);
+  } else if (optionTag === 1 && pdData.length >= 45) {
+    const authority = decodePubkey(pdData, 13);
     response.findings.push(finding(
       "PROGRAM_UPGRADE_AUTHORITY_ACTIVE", "Program has an active upgrade authority", "high", "present",
       "An address is recorded as the authority able to upgrade this program under the decoded loader layout.",
@@ -168,8 +178,11 @@ async function analyzeMint(address: string): Promise<AnalysisResponse> {
     return response;
   }
 
-  const supportedOwner = info.owner.equals(TOKEN_PROGRAM_ID) || info.owner.equals(TOKEN_2022_PROGRAM_ID);
-  if (!supportedOwner) {
+  // Uses web3.js v3 PublicKey instances — .equals() is safe (audit finding B-2 fixed).
+  const isToken = info.owner.equals(TOKEN_PROGRAM_ID);
+  const isToken2022 = info.owner.equals(TOKEN_2022_PROGRAM_ID);
+
+  if (!isToken && !isToken2022) {
     response.kind = "unknown";
     response.result = "unsupported";
     response.summary = "The account is not owned by the classic SPL Token or Token-2022 program.";
@@ -210,6 +223,16 @@ async function analyzeMint(address: string): Promise<AnalysisResponse> {
     : null;
   const supply = Buffer.from(decoded.supply).readBigUInt64LE(0).toString();
   const { decimals } = decoded;
+
+  // Token-2022 extension disclaimer (audit finding D-3)
+  if (isToken2022) {
+    response.warnings.push(
+      "This account uses the Token-2022 program. Extensions such as PermanentDelegate, " +
+      "TransferHook, DefaultAccountState, InterestBearingConfig, and others are NOT decoded by this MVP. " +
+      "The findings below reflect base mint fields (mint authority, freeze authority) only. " +
+      "Review on-chain extension data independently before making security judgements."
+    );
+  }
 
   response.findings.push(finding(
     mintAuthorityPubkey ? "TOKEN_MINT_AUTHORITY_ACTIVE" : "TOKEN_MINT_AUTHORITY_REVOKED",
@@ -252,6 +275,8 @@ export async function analyzeAddress(address: string, kind: "auto" | "program" |
   if (kind === "program") return analyzeProgram(key.toBase58());
   if (kind === "mint") return analyzeMint(key.toBase58());
 
+  // Auto-detect: single getAccountInfo call, result passed to sub-analyzers.
+  // This avoids the TOCTOU double-fetch (audit finding B-3).
   const info = await connection.getAccountInfo(key, "confirmed");
   if (!info) {
     const response = baseResponse(key.toBase58(), "unknown");

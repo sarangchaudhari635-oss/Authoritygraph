@@ -2,7 +2,8 @@
 
 **Know who controls your Solana protocol before that control becomes a security incident.**
 
-AuthorityGraph is a read-only security posture tool for Solana teams. It inspects on-chain program and token configuration, identifies privileged authorities, and turns the findings into an evidence-backed report that founders, engineers, and auditors can understand.
+
+
 
 > **Project status:** Hackathon MVP scaffold. Token-mint analysis and upgradeable-program authority decoding are implemented as initial checks, but the system has not been independently audited. Findings are indicators for review, not proof that a configuration is exploitable or unsafe.
 

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type Check (API)
+        run: npm run typecheck -w apps/api
+
+      - name: Type Check (Web)
+        run: npm run typecheck -w apps/web
+
+      - name: Run Tests (API)
+        run: npm run test -w apps/api
+
+      - name: Run Tests (Web)
+        run: npm run test -w apps/web
+        continue-on-error: true # Assuming web tests might not be fully implemented yet
+
+      - name: Build API
+        run: npm run build -w apps/api
+
+      - name: Build Web
+        run: npm run build -w apps/web

@@ -1,9 +1,9 @@
 import {
   LoaderV3Program,
   Connection,
-  PublicKey
+  PublicKey,
+  AccountInfo
 } from "@solana/web3.js";
-import { MintLayout } from "@solana/spl-token";
 import type { Finding, AnalysisResponse } from "./types.js";
 import { config } from "./config.js";
 
@@ -17,8 +17,45 @@ const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = LoaderV3Program.programId;
 
 export const connection = new Connection(config.rpcUrl, {
   commitment: "confirmed",
+  // This does not apply to getAccountInfo, handled by getAccountInfoWithTimeout below
   confirmTransactionInitialTimeout: config.requestTimeoutMs
 });
+
+/**
+ * Custom timeout wrapper for getAccountInfo (audit finding B-4).
+ * Ensures individual read-only RPC requests do not hang the connection indefinitely.
+ */
+async function getAccountInfoWithTimeout(conn: Connection, key: PublicKey): Promise<AccountInfo<Buffer | Uint8Array> | null> {
+  const timeoutMs = config.requestTimeoutMs;
+  return Promise.race([
+    conn.getAccountInfo(key, "confirmed"),
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error("RPC_TIMEOUT")), timeoutMs);
+      timer.unref(); // Don't hold event loop
+    })
+  ]);
+}
+
+/**
+ * Manual 82-byte SPL Token MintLayout decoder.
+ * Eliminates the @solana/spl-token dependency, resolving stream-json and uuid CVEs (audit finding H-1/H-2).
+ */
+export const MintLayout = {
+  span: 82,
+  decode: (buf: Buffer | Uint8Array) => {
+    if (buf.length < 82) throw new Error("Account data too short for MintLayout");
+    const data = Buffer.isBuffer(buf) ? buf : Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+    return {
+      mintAuthorityOption: data.readUInt32LE(0),
+      mintAuthority: new Uint8Array(data.subarray(4, 36)),
+      supply: new Uint8Array(data.subarray(36, 44)),
+      decimals: data[44],
+      isInitialized: data[45],
+      freezeAuthorityOption: data.readUInt32LE(46),
+      freezeAuthority: new Uint8Array(data.subarray(50, 82))
+    };
+  }
+};
 
 function finding(
   id: string,
@@ -48,7 +85,8 @@ function baseResponse(address: string, kind: AnalysisResponse["kind"]): Analysis
     address,
     kind,
     cluster: config.cluster,
-    observedAt: new Date().toISOString(),
+    // observedAt is left blank initially, populated when the analysis genuinely finishes (audit finding B-5)
+    observedAt: "",
     result: "findings",
     summary: "Analysis completed. Review each finding and its evidence.",
     findings: [],
@@ -61,24 +99,24 @@ function baseResponse(address: string, kind: AnalysisResponse["kind"]): Analysis
 
 /**
  * Decode a 32-byte public key from a Buffer at the given byte offset.
- * Accepts Uint8Array (web3.js v3 returns Uint8Array from RPC) — wrap
- * in Buffer.from() before calling if you need readUInt32LE etc.
  */
 function decodePubkey(data: Uint8Array, start: number): string {
   if (data.length < start + 32) throw new Error("Account data too short to decode public key");
   return new PublicKey(data.subarray(start, start + 32)).toBase58();
 }
 
-async function analyzeProgram(address: string): Promise<AnalysisResponse> {
+export async function analyzeProgram(address: string, preFetchedInfo?: AccountInfo<Buffer | Uint8Array> | null): Promise<AnalysisResponse> {
   const response = baseResponse(address, "program");
   const key = new PublicKey(address);
-  const info = await connection.getAccountInfo(key, "confirmed");
+  // Avoids redundant double-fetch in auto mode (audit finding B-3)
+  const info = preFetchedInfo || await getAccountInfoWithTimeout(connection, key);
 
   if (!info) {
     response.kind = "unknown";
     response.result = "unsupported";
     response.summary = "No account was found for this address on the configured cluster.";
     response.warnings.push("Verify the address and selected cluster.");
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
@@ -91,6 +129,7 @@ async function analyzeProgram(address: string): Promise<AnalysisResponse> {
       "The supplied address does not point to an executable program account.",
       "executable=false", "Read from account metadata.", "Submit a program ID to analyze upgrade authority.", address
     ));
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
@@ -104,35 +143,34 @@ async function analyzeProgram(address: string): Promise<AnalysisResponse> {
     ));
     response.result = "unsupported";
     response.summary = "The program is executable, but its loader authority format is outside the current MVP.";
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
-  // UpgradeableLoaderState::Program is enum variant 2 (4-byte LE u32), followed by a 32-byte ProgramData address.
-  // Wrap Uint8Array → Buffer so readUInt32LE() is available (audit finding B-1).
-  const data = Buffer.from(info.data.buffer, info.data.byteOffset, info.data.byteLength);
+  const data = Buffer.isBuffer(info.data) ? info.data : Buffer.from(info.data.buffer, info.data.byteOffset, info.data.byteLength);
   if (data.length < 36 || data.readUInt32LE(0) !== 2) {
     response.result = "unsupported";
     response.summary = "The program account data did not match the expected upgradeable-loader layout.";
     response.warnings.push("No authority conclusion was made because the loader data could not be decoded safely.");
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
   const programDataAddress = decodePubkey(data, 4);
-  const programDataInfo = await connection.getAccountInfo(new PublicKey(programDataAddress), "confirmed");
+  const programDataInfo = await getAccountInfoWithTimeout(connection, new PublicKey(programDataAddress));
 
-  // Wrap ProgramData account data similarly.
   const pdData = programDataInfo
-    ? Buffer.from(programDataInfo.data.buffer, programDataInfo.data.byteOffset, programDataInfo.data.byteLength)
+    ? (Buffer.isBuffer(programDataInfo.data) ? programDataInfo.data : Buffer.from(programDataInfo.data.buffer, programDataInfo.data.byteOffset, programDataInfo.data.byteLength))
     : null;
 
   if (!pdData || pdData.length < 13 || pdData.readUInt32LE(0) !== 3) {
     response.result = "unsupported";
     response.summary = "The ProgramData account could not be decoded using the expected loader layout.";
     response.warnings.push("No authority conclusion was made because ProgramData evidence was incomplete.");
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
-  // UpgradeableLoaderState::ProgramData: enum tag (4 bytes), slot (8 bytes), Option<Pubkey>.
   const deploymentSlot = pdData.readBigUInt64LE(4).toString();
   const optionTag = pdData[12];
 
@@ -162,23 +200,25 @@ async function analyzeProgram(address: string): Promise<AnalysisResponse> {
     response.warnings.push("No authority conclusion was made.");
   }
 
+  response.observedAt = new Date().toISOString();
   return response;
 }
 
-async function analyzeMint(address: string): Promise<AnalysisResponse> {
+export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<Buffer | Uint8Array> | null): Promise<AnalysisResponse> {
   const response = baseResponse(address, "mint");
   const key = new PublicKey(address);
-  const info = await connection.getAccountInfo(key, "confirmed");
+  // Avoids redundant double-fetch in auto mode (audit finding B-3)
+  const info = preFetchedInfo || await getAccountInfoWithTimeout(connection, key);
 
   if (!info) {
     response.kind = "unknown";
     response.result = "unsupported";
     response.summary = "No account was found for this address on the configured cluster.";
     response.warnings.push("Verify the address and selected cluster.");
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
-  // Uses web3.js v3 PublicKey instances — .equals() is safe (audit finding B-2 fixed).
   const isToken = info.owner.equals(TOKEN_PROGRAM_ID);
   const isToken2022 = info.owner.equals(TOKEN_2022_PROGRAM_ID);
 
@@ -187,30 +227,29 @@ async function analyzeMint(address: string): Promise<AnalysisResponse> {
     response.result = "unsupported";
     response.summary = "The account is not owned by the classic SPL Token or Token-2022 program.";
     response.warnings.push(`Observed account owner: ${info.owner.toBase58()}`);
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
-  // Decode mint using MintLayout (82-byte classic SPL layout)
-  // Works for both TOKEN_PROGRAM_ID and TOKEN_2022_PROGRAM_ID base mint fields
-  let decoded: {
-    mintAuthorityOption: number;
-    mintAuthority: Uint8Array;
-    supply: Uint8Array;
-    decimals: number;
-    isInitialized: number;
-    freezeAuthorityOption: number;
-    freezeAuthority: Uint8Array;
-  };
+  // Prevent token accounts (165 bytes) from being silently decoded as mints (82 bytes) (audit finding D-4)
+  if (info.data.length === 165) {
+    response.kind = "unknown";
+    response.result = "unsupported";
+    response.summary = "The provided address appears to be a token account, not a mint account.";
+    response.warnings.push("Token accounts are not supported by the mint analysis endpoint.");
+    response.observedAt = new Date().toISOString();
+    return response;
+  }
+
+  let decoded;
   try {
-    if (info.data.length < MintLayout.span) {
-      throw new Error("Account data too short for MintLayout");
-    }
-    decoded = MintLayout.decode(info.data.slice(0, MintLayout.span)) as typeof decoded;
+    decoded = MintLayout.decode(info.data.subarray(0, MintLayout.span));
   } catch {
     response.kind = "unknown";
     response.result = "unsupported";
     response.summary = "The token account could not be decoded as a supported mint.";
-    response.warnings.push("The address may refer to a token account rather than a mint.");
+    response.warnings.push("The address data did not match the expected mint layout.");
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
@@ -224,7 +263,6 @@ async function analyzeMint(address: string): Promise<AnalysisResponse> {
   const supply = Buffer.from(decoded.supply).readBigUInt64LE(0).toString();
   const { decimals } = decoded;
 
-  // Token-2022 extension disclaimer (audit finding D-3)
   if (isToken2022) {
     response.warnings.push(
       "This account uses the Token-2022 program. Extensions such as PermanentDelegate, " +
@@ -266,6 +304,7 @@ async function analyzeMint(address: string): Promise<AnalysisResponse> {
     address
   ));
 
+  response.observedAt = new Date().toISOString();
   return response;
 }
 
@@ -275,24 +314,25 @@ export async function analyzeAddress(address: string, kind: "auto" | "program" |
   if (kind === "program") return analyzeProgram(key.toBase58());
   if (kind === "mint") return analyzeMint(key.toBase58());
 
-  // Auto-detect: single getAccountInfo call, result passed to sub-analyzers.
-  // This avoids the TOCTOU double-fetch (audit finding B-3).
-  const info = await connection.getAccountInfo(key, "confirmed");
+  // Auto-detect branch
+  const info = await getAccountInfoWithTimeout(connection, key);
   if (!info) {
     const response = baseResponse(key.toBase58(), "unknown");
     response.result = "unsupported";
     response.summary = "No account was found for this address on the configured cluster.";
+    response.observedAt = new Date().toISOString();
     return response;
   }
 
-  if (info.executable) return analyzeProgram(key.toBase58());
+  if (info.executable) return analyzeProgram(key.toBase58(), info);
   if (info.owner.equals(TOKEN_PROGRAM_ID) || info.owner.equals(TOKEN_2022_PROGRAM_ID)) {
-    return analyzeMint(key.toBase58());
+    return analyzeMint(key.toBase58(), info);
   }
 
   const response = baseResponse(key.toBase58(), "unknown");
   response.result = "unsupported";
   response.summary = "This account type is not supported by the current MVP.";
   response.warnings.push(`Observed account owner: ${info.owner.toBase58()}`);
+  response.observedAt = new Date().toISOString();
   return response;
 }

@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import { PublicKey } from "@solana/web3.js";
-import { MintLayout } from "@solana/spl-token";
+import { MintLayout } from "./solana.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper factories for binary fixtures

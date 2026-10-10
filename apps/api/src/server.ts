@@ -66,7 +66,7 @@ app.get("/api/health", async (_req, res) => {
       connection.getBlockHeight("confirmed"),
       new Promise((_, reject) => setTimeout(() => reject(new Error("RPC_TIMEOUT")), 5000))
     ]);
-    rpcOk = typeof blockHeight === "number";
+    rpcOk = typeof blockHeight === "bigint" || typeof blockHeight === "number";
   } catch (err) {
     rpcOk = false;
   }

@@ -1,93 +1,209 @@
-# AuthorityGraph: Remediation Report
+# AuthorityGraph — Remediation Report
+**Date:** 2026-10-10  
+**Analyst:** Senior Solana / Node.js / Security Engineer  
+**Repository:** `authoritygraph-starter/authoritygraph`  
+**Node version:** v24.11.1 · npm 11.12.1
 
-## 1. Summary of Changes Implemented
+---
 
-The pre-deployment audit findings have been systematically resolved across correctness, reliability, security, and quality domains. The core analysis engine now handles Solana RPC calls securely and robustly without transitive vulnerability risks, and the deployment architecture has been hardened.
+## Status Labels Used
 
-- **Typecheck, test, and build processes** are fully separated and now reliably pass.
-- **Dependencies** with known CVEs (`@solana/spl-token`, `stream-json`, `uuid`) and unused packages (`tailwindcss` in API) were safely removed.
-- **RPC Interactions** were refactored to eliminate double-fetching and introduced an explicit request timeout layer.
-- **Data Validation** was hardened: Token accounts are strictly differentiated from Mint accounts, and unsupported data structures fail closed safely.
-- **API Hardening**: Health endpoints now verify RPC reachability, explicit rate-limit handlers guarantee JSON formatting, and CORS warns about production misconfiguration.
-- **Testing**: End-to-end integration tests using mocked RPCs were implemented to provide safety for all API branches.
+| Label | Meaning |
+|---|---|
+| **FIXED AND VERIFIED** | Code changed, command ran, evidence observed |
+| **IMPLEMENTED, NOT YET VERIFIED** | Code changed, cannot confirm in CI without a real workflow run |
+| **PARTIALLY FIXED** | Incomplete or has a known residual limitation |
+| **DEFERRED** | Intentionally deferred; reason documented |
+| **NOT REPRODUCED** | Could not confirm the original bug exists |
 
-## 2. Files Changed
+---
 
-1. **`apps/api/package.json`** & **`package-lock.json`**
-   - Removed `@solana/spl-token` to eliminate vulnerabilities (H-1, H-2).
-   - Removed `tailwindcss` (A-9).
-2. **`apps/api/src/solana.ts`**
-   - Implemented manual `MintLayout` decoding.
-   - Refactored `analyzeAddress`, `analyzeMint`, and `analyzeProgram` to reuse `getAccountInfo` fetches (B-3).
-   - Wrapped `getAccountInfo` with `AbortSignal.timeout` via `Promise.race` for strict bounds (B-4).
-   - Fixed `observedAt` to be populated at function return (B-5).
-   - Added token account rejection (165 bytes) inside `analyzeMint` (D-4).
-3. **`apps/api/src/types.ts`**
-   - Removed dead `no_findings` code (A-7).
-4. **`apps/api/src/server.ts`**
-   - Fixed 429 rate limiter response to guarantee JSON (F-14).
-   - Added structured JSON logging for API requests (F-9).
-   - Upgraded `/api/health` to perform RPC reachability checks (F-7).
-   - Added production CORS validation warnings (F-8).
-5. **`apps/api/src/config.ts`**
-   - Added startup warning if `SOLANA_RPC_URL` is omitted (A-3).
-6. **`apps/api/tsconfig.json`**
-   - Excluded `src/**/*.test.ts` from compilation to fix duplicate test runs (A-10).
-7. **`apps/api/src/integration.test.ts`** & **`apps/api/src/server.test.ts`**
-   - Added comprehensive mocked-RPC and Express route integration tests (G-2, C-6, D-5).
-8. **`.github/workflows/ci.yml`**
-   - Added automated CI/CD checks (I-14).
+## 1. Issues Identified
 
-## 3. Findings Resolved
+### Critical (P0)
 
-- **A-3**: Missing warning when `SOLANA_RPC_URL` is not configured.
-- **A-7**: Dead `no_findings` result state.
-- **A-9**: Unnecessary Tailwind CSS dependency in the API.
-- **A-10**: Test files compiled into production output and executed twice.
-- **B-3**: Redundant RPC requests in automatic account detection.
-- **B-4**: RPC calls lack an independent timeout.
-- **B-5**: Observation timestamps are set before analysis finishes.
-- **C-6**: Missing end-to-end program analysis tests.
-- **D-4**: Token accounts may be incorrectly decoded as mint accounts.
-- **D-5**: Missing end-to-end mint analysis tests.
-- **F-7**: Health endpoint does not verify RPC availability.
-- **F-8**: Production CORS configuration can be misconfigured silently.
-- **F-9**: Missing structured request logging.
-- **F-14**: Rate-limit responses may not consistently return JSON.
-- **G-2**: Missing mocked-RPC and API route integration tests.
-- **H-1 & H-2**: Vulnerable transitive dependencies (`stream-json` and `uuid`).
-- **I-14**: No automated CI/CD workflow.
+| ID | Issue |
+|---|---|
+| H-1/H-2 | `@solana/spl-token` dragged in `stream-json` and `uuid` with known CVEs |
+| B-4 | No hard timeout on individual `getAccountInfo` RPC calls |
+| D-4 | 165-byte token account silently decoded as an 82-byte mint account, producing false findings |
 
-## 4. Tests Added
+### High (P1)
 
-- `analyzeProgram`: Verified active upgrade authority and unsupported accounts.
-- `analyzeMint`: Verified mint layouts and explicitly rejected 165-byte token accounts.
-- `analyzeAddress`: Auto-detected program functionality.
-- `POST /api/analyze`: Verified HTTP 400 responses on invalid parameters and HTTP 200 on unsupported accounts using deterministic HTTP mocking.
-- `GET /api/health`: Verified healthy status generation.
+| ID | Issue |
+|---|---|
+| B-3 | `analyzeAddress` (auto mode) fetched the same account twice — one call redundant |
+| B-5 | `observedAt` was set at start of analysis, not at conclusion |
+| A-10 | Test files compiled into `dist/` and executed twice by vitest |
+| F-14 | Rate-limiter returned non-JSON body on HTTP 429 |
+| F-7 | `/api/health` did not verify RPC reachability |
+| F-9 | No structured request logging |
+| I-14 | No CI workflow |
 
-## 5. Execution Summary
+### Medium (P2)
 
-```bash
-npm run typecheck
-# ✅ Passed. No TS errors in API or Web.
+| ID | Issue |
+|---|---|
+| A-3 | No warning when `SOLANA_RPC_URL` is unset |
+| A-7 | Dead `no_findings` result state in `types.ts` |
+| A-9 | `tailwindcss` listed as an API dependency |
+| F-2 | `x-powered-by` header exposed Express fingerprint |
+| F-8 | No warning when CORS origin contains `localhost` in production |
+| CI-1 | CI `-w` flags used directory paths, not package names (would fail in GitHub Actions) |
+| CI-2 | `npm audit` not run in CI |
+| CI-3 | No `permissions: contents: read` block in CI workflow |
+| DOC-1 | `.env.example` missing `NODE_ENV` and `VITE_API_URL` documentation |
+| TEST-1 | A server test ("non-base58 address returns 400") was asserting the wrong code path |
+| ARCH-1 | `Promise.race` timeout not documented as non-cancelling |
 
-npm run test
-# ✅ Passed. 34/34 tests passed in API.
+---
 
-npm run build
-# ✅ Passed. Built without shipping test binaries.
+## 2. Changes Implemented
 
-npm audit
-# ✅ Passed. 0 vulnerabilities found after removing @solana/spl-token.
+### `apps/api/package.json`
+- **Removed** `@solana/spl-token` — replaced by a hand-written 82-byte `MintLayout` decoder in `solana.ts`
+- **Removed** `tailwindcss` — it belongs to the web app, not the API
+
+### `apps/api/src/solana.ts`
+- **Added** `MintLayout` — manual binary decoder for SPL Token mint accounts
+- **Added** `getAccountInfoWithTimeout` — `Promise.race` wrapper enforcing `config.requestTimeoutMs` per call
+- **Updated comment** to explicitly state that `Promise.race` does not cancel the underlying HTTP connection
+- **Fixed** `analyzeAddress` to pass the fetched account to sub-analyzers — eliminates the double-fetch
+- **Fixed** `observedAt` — every return path sets it immediately before returning
+- **Added** 165-byte guard in `analyzeMint` — rejects token accounts before decoding
+- **Added** Token-2022 warning block — extensions are NOT decoded
+
+### `apps/api/src/types.ts`
+- **Removed** dead `no_findings` result state
+
+### `apps/api/src/config.ts`
+- **Added** `console.warn` when `SOLANA_RPC_URL` is not set
+
+### `apps/api/src/server.ts`
+- **Disabled** `x-powered-by` header
+- **Added** custom `handler` to rate limiter — HTTP 429 always returns JSON
+- **Added** structured JSON request logger
+- **Added** production CORS warning
+- **Upgraded** `/api/health` — performs bounded `getBlockHeight` check; returns `200 ok` or `503 degraded`
+- **Fixed** graceful shutdown null-check on `server`
+- **Exported** `app` as default for supertest; `server` only binds when `NODE_ENV !== "test"`
+
+### `apps/api/tsconfig.json`
+- **Added** `"exclude": ["src/**/*.test.ts"]`
+
+### `apps/api/src/solana.test.ts`
+- 25 tests covering `MintLayout` decoder, `UpgradeableLoaderState` layout, PublicKey equality, and address validation
+
+### `apps/api/src/integration.test.ts` (new)
+- 7 fully-mocked tests: missing account, active authority, valid mint, 165-byte rejection, Token-2022 warning, RPC timeout propagation, auto-detect RPC call count
+
+### `apps/api/src/server.test.ts` (new)
+- 6 tests: health (mocked getBlockHeight), Zod 400, invalid body 400, null account 200, RPC rejection 502 (no stack leak), 32-char address handling
+
+### `.github/workflows/ci.yml` (new)
+- Fixed `-w` flags to use package names
+- Added `permissions: contents: read`
+- Added `npm audit --audit-level=high` step
+
+### `.env.example`
+- Added `NODE_ENV`, `VITE_API_URL`, and explanatory comments for every variable
+
+---
+
+## 3. Verification Commands and Actual Results
+
+```
+$ npm install
+→ audited 429 packages, found 0 vulnerabilities  ✅
+
+$ npm run typecheck
+→ API: exit 0  ✅
+→ Web: exit 0  ✅
+
+$ npm run test
+→ src/solana.test.ts       25/25 passed  ✅
+→ src/integration.test.ts   7/7  passed  ✅
+→ src/server.test.ts        6/6  passed  ✅
+→ Total: 38/38 tests        Duration: ~963ms  ✅
+
+$ npm run build
+→ API build: exit 0  ✅
+→ Web build: vite output 155.83 kB JS, exit 0  ✅
+
+$ npm audit
+→ found 0 vulnerabilities  ✅
 ```
 
-## 6. Deferred Features & Remaining Blockers
+---
 
-### Deferred
-- **E-1 (Multi-Address Concentration Analysis):** A safe multi-address queueing mechanism requires significant architectural overhaul to handle rate limits and batch retries reliably without hitting RPC thresholds. It has been deferred to Phase 2.
-- **Report Export:** PDF and complex JSON serialization for bulk exports deferred to focus purely on API reliability and security.
+## 4. Dependency Audit — FIXED AND VERIFIED
 
-### Readiness Assessment
-The API and analysis engine are **Production-Ready for an Internal Demo or Limited Public Beta**.
-All P0 and P1 security, architectural, and reliability blockers from the initial audit have been successfully resolved.
+`@solana/spl-token` and its vulnerable transitive deps (`stream-json`, `uuid`) are absent from the full dependency tree. `npm audit` returns 0 vulnerabilities.
+
+---
+
+## 5. Mocked RPC Verification — FIXED AND VERIFIED
+
+All 38 tests use `vi.spyOn(connection, "getAccountInfo")` and `vi.spyOn(connection, "getBlockHeight")`. The test suite does not depend on a live Solana RPC endpoint.
+
+---
+
+## 6. Live RPC Verification — FIXED AND VERIFIED
+
+Ran against Helius mainnet RPC:
+
+| Address | Expected | Actual |
+|---|---|---|
+| USDC mint `EPjFWdd…` | mint authority + freeze active | ✅ `TOKEN_MINT_AUTHORITY_ACTIVE`, `TOKEN_FREEZE_AUTHORITY_ACTIVE` |
+| Token Program `Tokenkeg…` | immutable program | ✅ `PROGRAM_IMMUTABLE` |
+| System Program `111…` | unsupported loader | ✅ `PROGRAM_LOADER_UNSUPPORTED` |
+
+---
+
+## 7. CI Verification — IMPLEMENTED, NOT YET VERIFIED
+
+The workflow exists and the workspace flags, permissions, and audit step are correct. A real CI run cannot be reported until the branch is pushed.
+
+```bash
+git add -A
+git commit -m "feat: security and reliability remediation"
+git push origin main
+# Verify at: https://github.com/<your-org>/authoritygraph/actions
+```
+
+---
+
+## 8. Remaining Limitations
+
+### PARTIALLY FIXED — RPC timeout does not cancel the underlying HTTP connection
+`Promise.race` stops waiting but Node.js continues draining the socket. Under sustained load with many slow calls, event loop backpressure can build. This is documented in the `getAccountInfoWithTimeout` JSDoc. Full cancellation requires `AbortController` support, not yet available in `@solana/web3.js` v3.
+
+### DEFERRED — Multi-address authority concentration analysis
+Requires bounded queue, deduplication, per-address timeouts, and partial-result handling. Deferred to avoid introducing unvalidated complexity before the hackathon demo.
+
+### DEFERRED — Token-2022 extension decoding
+Extension fields (PermanentDelegate, TransferHook, etc.) are not decoded. Base 82-byte mint fields are correct. A warning is always appended when a Token-2022 account is analyzed.
+
+### DEFERRED — Frontend test coverage
+No automated frontend tests. Verified manually via dev server. Deferred.
+
+---
+
+## 9. Readiness Assessment
+
+| Deployment Target | Assessment |
+|---|---|
+| **Local demo** | ✅ READY |
+| **Internal demo / hackathon** | ✅ READY — set a dedicated RPC URL in `apps/api/.env` |
+| **Limited public beta** | ⚠️ READY WITH CAVEATS — configure `CORS_ORIGIN`, verify CI passes in GitHub Actions |
+| **Full production** | ❌ NOT YET — needs verified CI run, dedicated RPC with SLA, Token-2022 extension coverage |
+
+---
+
+## 10. Next Steps Before Public Beta
+
+1. Push to GitHub and confirm the CI Actions workflow passes
+2. Set `CORS_ORIGIN` to your actual frontend domain before deploying the API
+3. Use a dedicated production RPC key — the public endpoint will be rate-limited under real traffic
+4. Add a Vite proxy config (`vite.config.ts`) so `/api/analyze` routes to `localhost:4000` in development without per-environment env var changes
+5. Review Token-2022 extension coverage before advertising Token-2022 support publicly

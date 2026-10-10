@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: ["main"]
 
+# Minimum permissions — prevents accidental token exposure in PR builds
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -23,21 +27,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Use package names (not directory paths) as workspace flags
       - name: Type Check (API)
-        run: npm run typecheck -w apps/api
+        run: npm run typecheck -w @authoritygraph/api
 
       - name: Type Check (Web)
-        run: npm run typecheck -w apps/web
+        run: npm run typecheck -w @authoritygraph/web
 
       - name: Run Tests (API)
-        run: npm run test -w apps/api
+        run: npm run test -w @authoritygraph/api
 
       - name: Run Tests (Web)
-        run: npm run test -w apps/web
-        continue-on-error: true # Assuming web tests might not be fully implemented yet
+        run: npm run test -w @authoritygraph/web
+        continue-on-error: true # No web tests yet; continue to surface build errors
 
       - name: Build API
-        run: npm run build -w apps/api
+        run: npm run build -w @authoritygraph/api
 
       - name: Build Web
-        run: npm run build -w apps/web
+        run: npm run build -w @authoritygraph/web
+
+      # Audit AFTER build so lockfile is fully resolved
+      - name: Dependency audit
+        run: npm audit --audit-level=high

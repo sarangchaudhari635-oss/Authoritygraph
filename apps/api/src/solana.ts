@@ -23,7 +23,13 @@ export const connection = new Connection(config.rpcUrl, {
 
 /**
  * Custom timeout wrapper for getAccountInfo (audit finding B-4).
- * Ensures individual read-only RPC requests do not hang the connection indefinitely.
+ * Uses Promise.race to stop WAITING for a slow RPC response after timeoutMs.
+ *
+ * IMPORTANT architectural note: this does NOT cancel the underlying HTTP
+ * connection. Node.js will still drain the socket in the background. The
+ * timeout only prevents the calling function from blocking indefinitely.
+ * For full cancellation, an AbortController would need to be passed into the
+ * Connection constructor and is not yet supported by @solana/web3.js v3.
  */
 async function getAccountInfoWithTimeout(conn: Connection, key: PublicKey): Promise<AccountInfo<Buffer | Uint8Array> | null> {
   const timeoutMs = config.requestTimeoutMs;

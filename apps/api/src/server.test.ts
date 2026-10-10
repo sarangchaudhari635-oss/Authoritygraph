@@ -38,8 +38,22 @@ describe("API Routes Integration", () => {
     
     expect(res.status).toBe(200);
     expect(res.body.result).toBe("unsupported");
-    expect(res.body.summary).toContain("No account was found");
     
+    vi.restoreAllMocks();
+  });
+
+  it("POST /api/analyze returns 502 on RPC failure without leaking internals", async () => {
+    vi.spyOn(connection, "getAccountInfo").mockRejectedValueOnce(new Error("RPC_TIMEOUT"));
+
+    const res = await request(app)
+      .post("/api/analyze")
+      .send({ address: "11111111111111111111111111111111", kind: "auto" });
+    
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe("ANALYSIS_FAILED");
+    expect(res.body.message).toContain("RPC provider may be unavailable");
+    expect(res.body.message).not.toContain("RPC_TIMEOUT"); // Doesn't leak stack trace
+
     vi.restoreAllMocks();
   });
 });

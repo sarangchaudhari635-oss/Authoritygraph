@@ -83,19 +83,36 @@ describe("Analyzer Integration with Mocked RPC", () => {
     expect(res.summary).toContain("token account");
   });
 
+  it("analyzeMint - handles Token-2022 mints", async () => {
+    const mintData = Buffer.alloc(82);
+    mintData[45] = 1; 
+    const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    mockGetAccountInfo.mockResolvedValueOnce({ executable: false, owner: TOKEN_2022, data: mintData });
+
+    const res = await analyzeMint("11111111111111111111111111111111");
+    expect(res.warnings.some(w => w.includes("Token-2022"))).toBe(true);
+  });
+
+  it("analyzeProgram - handles RPC timeout safely", async () => {
+    mockGetAccountInfo.mockRejectedValueOnce(new Error("RPC_TIMEOUT"));
+    await expect(analyzeProgram("11111111111111111111111111111111")).rejects.toThrow("RPC_TIMEOUT");
+  });
+
   it("analyzeAddress auto-detects program", async () => {
     const progData = Buffer.alloc(36);
     progData.writeUInt32LE(2, 0); // Program tag
     
-    mockGetAccountInfo.mockResolvedValue({
-      executable: true,
-      owner: BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
-      data: progData
-    });
+    mockGetAccountInfo
+      .mockResolvedValueOnce({
+        executable: true,
+        owner: BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
+        data: progData
+      })
+      .mockResolvedValueOnce(null); // The ProgramData fetch
 
     const res = await analyzeAddress("11111111111111111111111111111111", "auto");
     expect(res.kind).toBe("program");
-    // Fails closed because program data isn't complete in this mock, but we verified the path
-    expect(res.result).toBe("unsupported"); 
+    // Verify it called RPC twice: once for the program, once for the ProgramData. No redundant program fetches.
+    expect(mockGetAccountInfo).toHaveBeenCalledTimes(2); 
   });
 });

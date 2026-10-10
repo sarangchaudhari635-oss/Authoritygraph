@@ -20,9 +20,11 @@ const limiter = rateLimit({
   max: 30,             // 30 requests per IP per minute
   standardHeaders: "draft-7",
   legacyHeaders: false,
-  message: {
-    error: "RATE_LIMITED",
-    message: "Too many requests. Please wait before retrying."
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "RATE_LIMITED",
+      message: "Too many requests. Please wait before retrying."
+    });
   }
 });
 app.use("/api/analyze", limiter);
@@ -32,11 +34,48 @@ const analyzeSchema = z.object({
   kind: z.enum(["auto", "program", "mint"]).default("auto")
 });
 
-app.get("/api/health", (_req, res) => {
-  res.json({
-    status: "ok",
+// ── Request Logging (audit finding F-9)
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    if (req.path === "/api/health" && res.statusCode === 200) return; // omit noisy health checks
+    console.log(JSON.stringify({
+      time: new Date().toISOString(),
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      durationMs: duration
+    }));
+  });
+  next();
+});
+
+// ── Production CORS Validation (audit finding F-8)
+if (process.env.NODE_ENV === "production" && config.corsOrigin.includes("localhost")) {
+  console.warn("[SECURITY] WARNING: API is starting in production with a localhost CORS origin.");
+}
+
+app.get("/api/health", async (_req, res) => {
+  // RPC Reachability check (audit finding F-7)
+  let rpcOk = false;
+  try {
+    const { connection } = await import("./solana.js");
+    // Lightweight RPC check
+    const blockHeight = await Promise.race([
+      connection.getBlockHeight("confirmed"),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("RPC_TIMEOUT")), 5000))
+    ]);
+    rpcOk = typeof blockHeight === "bigint" || typeof blockHeight === "number";
+  } catch (err) {
+    rpcOk = false;
+  }
+
+  res.status(rpcOk ? 200 : 503).json({
+    status: rpcOk ? "ok" : "degraded",
     service: "authoritygraph-api",
     cluster: config.cluster,
+    rpcConnected: rpcOk,
     timestamp: new Date().toISOString()
   });
 });
@@ -68,7 +107,7 @@ app.post("/api/analyze", async (req, res) => {
   } catch (error) {
     if (res.headersSent) return;
     const message = error instanceof Error ? error.message : "Unknown error";
-    const isAddressError = /public key|base58|Non-base58/i.test(message);
+    const isAddressError = /public key|base58|Non-base58|address/i.test(message);
     res.status(isAddressError ? 400 : 502).json({
       error: isAddressError ? "INVALID_ADDRESS" : "ANALYSIS_FAILED",
       message: isAddressError
@@ -82,18 +121,24 @@ app.use((_req, res) => {
   res.status(404).json({ error: "NOT_FOUND", message: "Route not found." });
 });
 
-const server = app.listen(config.port, () => {
+export const server = process.env.NODE_ENV !== "test" ? app.listen(config.port, () => {
   console.log(`AuthorityGraph API listening on http://localhost:${config.port}`);
   console.log(`Solana cluster label: ${config.cluster}`);
-});
+}) : null;
+
+export default app;
 
 // ── Graceful shutdown — handle SIGTERM and SIGINT (audit finding I / deployment readiness)
 function shutdown(signal: string) {
   console.log(`\nReceived ${signal}. Closing HTTP server…`);
-  server.close(() => {
-    console.log("HTTP server closed. Exiting.");
+  if (server) {
+    server.close(() => {
+      console.log("HTTP server closed. Exiting.");
+      process.exit(0);
+    });
+  } else {
     process.exit(0);
-  });
+  }
   // Force-exit after 10 s if connections don't drain
   setTimeout(() => process.exit(1), 10_000).unref();
 }

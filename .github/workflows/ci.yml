@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+# Minimum permissions — prevents accidental token exposure in PR builds
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Use package names (not directory paths) as workspace flags
+      - name: Type Check (API)
+        run: npm run typecheck -w @authoritygraph/api
+
+      - name: Type Check (Web)
+        run: npm run typecheck -w @authoritygraph/web
+
+      - name: Run Tests (API)
+        run: npm run test -w @authoritygraph/api
+
+      - name: Run Tests (Web)
+        run: npm run test -w @authoritygraph/web
+        continue-on-error: true # No web tests yet; continue to surface build errors
+
+      - name: Build API
+        run: npm run build -w @authoritygraph/api
+
+      - name: Build Web
+        run: npm run build -w @authoritygraph/web
+
+      # Audit AFTER build so lockfile is fully resolved
+      - name: Dependency audit
+        run: npm audit --audit-level=high

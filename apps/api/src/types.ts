@@ -24,7 +24,7 @@ export interface AnalysisResponse {
   kind: "program" | "mint" | "unknown";
   cluster: string;
   observedAt: string;
-  result: "findings" | "no_findings" | "unsupported";
+  result: "findings" | "unsupported";
   summary: string;
   findings: Finding[];
   warnings: string[];

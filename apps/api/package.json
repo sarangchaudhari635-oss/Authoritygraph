@@ -11,19 +11,19 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@solana/spl-token": "^0.1.8",
     "@solana/web3.js": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "express-rate-limit": "^8.7.1",
-    "tailwindcss": "4.3.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.4",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1",
     "tsx": "^4.19.3",
     "vitest": "^5.0.3"
   }

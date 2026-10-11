@@ -71,4 +71,57 @@ describe("API Routes Integration", () => {
 
     vi.restoreAllMocks();
   });
+
+  it("GET /api/snapshots/:address returns snapshot history", async () => {
+    const res = await request(app).get("/api/snapshots/11111111111111111111111111111111");
+    expect(res.status).toBe(200);
+    expect(res.body.address).toBe("11111111111111111111111111111111");
+    expect(Array.isArray(res.body.snapshots)).toBe(true);
+  });
+
+  it("GET /api/snapshots/:address returns 400 on invalid address parameter", async () => {
+    const res = await request(app).get("/api/snapshots/short");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("INVALID_ADDRESS");
+  });
+
+  it("POST /api/policy/evaluate evaluates policy on provided analysis", async () => {
+    const mockAnalysis = {
+      address: "Prog111111111111111111111111111111111111111",
+      kind: "program",
+      cluster: "mainnet-beta",
+      observedAt: "2026-10-11T12:00:00Z",
+      result: "findings",
+      summary: "Program",
+      findings: [
+        {
+          id: "PROGRAM_IMMUTABLE",
+          title: "Immutable",
+          severity: "info",
+          status: "absent",
+          summary: "",
+          recommendation: "",
+          evidence: [{ source: "RPC", observedValue: "null", detail: "immutable" }]
+        }
+      ],
+      warnings: []
+    };
+
+    const res = await request(app)
+      .post("/api/policy/evaluate")
+      .send({ analysis: mockAnalysis });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("PASS");
+    expect(Array.isArray(res.body.rules)).toBe(true);
+  });
+
+  it("POST /api/compare handles invalid request gracefully", async () => {
+    const res = await request(app)
+      .post("/api/compare")
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("INVALID_REQUEST");
+  });
 });

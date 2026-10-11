@@ -8,6 +8,8 @@ import type { Finding, AnalysisResponse, AuthorityType } from "./types.js";
 import { config } from "./config.js";
 import { parseToken2022Extensions, extensionsToFindings } from "./token2022.js";
 import { resolveAuthority } from "./authority-resolver.js";
+import { buildAuthorityControlGraph } from "./graph-builder.js";
+import { evaluatePolicy } from "./policy-engine.js";
 
 // ── Program IDs constructed from web3.js v3 PublicKey (not spl-token's bundled v1 copy)
 // This avoids the cross-version PublicKey.equals() crash (audit finding B-2).
@@ -76,10 +78,20 @@ function finding(
   recommendation: string,
   accountAddress?: string,
   limitations?: string[],
-  authorityType?: AuthorityType
+  authorityType?: AuthorityType,
+  category?: Finding["category"]
 ): Finding {
   return {
-    id, title, severity, status, summary, recommendation, limitations, authorityType,
+    id,
+    title,
+    severity,
+    status,
+    summary,
+    recommendation,
+    limitations,
+    authorityType,
+    ruleVersion: "1.0.0",
+    category,
     evidence: [{
       source: "Solana RPC account data",
       accountAddress,
@@ -125,6 +137,8 @@ export async function analyzeProgram(address: string, preFetchedInfo?: AccountIn
     response.result = "unsupported";
     response.summary = "No account was found for this address on the configured cluster.";
     response.warnings.push("Verify the address and selected cluster.");
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -136,8 +150,11 @@ export async function analyzeProgram(address: string, preFetchedInfo?: AccountIn
     response.findings.push(finding(
       "ACCOUNT_NOT_EXECUTABLE", "Account is not executable", "info", "present",
       "The supplied address does not point to an executable program account.",
-      "executable=false", "Read from account metadata.", "Submit a program ID to analyze upgrade authority.", address
+      "executable=false", "Read from account metadata.", "Submit a program ID to analyze upgrade authority.", address,
+      undefined, undefined, "account-integrity"
     ));
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -148,10 +165,13 @@ export async function analyzeProgram(address: string, preFetchedInfo?: AccountIn
       "This executable program is not owned by the upgradeable BPF loader recognized by this MVP.",
       info.owner.toBase58(), "Account owner is the loader program ID.",
       "Review the loader and its authority model manually. Do not infer immutability from this result.", address,
-      ["Other loaders and loader-specific authority formats are not decoded."]
+      ["Other loaders and loader-specific authority formats are not decoded."],
+      undefined, "upgrade-authority"
     ));
     response.result = "unsupported";
     response.summary = "The program is executable, but its loader authority format is outside the current MVP.";
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -161,6 +181,8 @@ export async function analyzeProgram(address: string, preFetchedInfo?: AccountIn
     response.result = "unsupported";
     response.summary = "The program account data did not match the expected upgradeable-loader layout.";
     response.warnings.push("No authority conclusion was made because the loader data could not be decoded safely.");
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -176,6 +198,8 @@ export async function analyzeProgram(address: string, preFetchedInfo?: AccountIn
     response.result = "unsupported";
     response.summary = "The ProgramData account could not be decoded using the expected loader layout.";
     response.warnings.push("No authority conclusion was made because ProgramData evidence was incomplete.");
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -190,7 +214,8 @@ export async function analyzeProgram(address: string, preFetchedInfo?: AccountIn
       "upgradeAuthority=null",
       `ProgramData=${programDataAddress}; deploymentSlot=${deploymentSlot}.`,
       "Keep deployment and source-verification evidence with the release record.",
-      programDataAddress
+      programDataAddress,
+      undefined, undefined, "upgrade-authority"
     ));
   } else if (optionTag === 1 && pdData.length >= 45) {
     const authority = decodePubkey(pdData, 13);
@@ -225,14 +250,35 @@ export async function analyzeProgram(address: string, preFetchedInfo?: AccountIn
       "Verify the authority's custody, approval policy, recovery process, and whether the trust model is documented.",
       programDataAddress,
       limitations,
-      authorityType
+      authorityType,
+      "upgrade-authority"
     ));
+
+    // Squads verifiable configuration risk finding (Feature Two)
+    if (authorityType === "squads-multisig" && resolved.multisigThreshold === 1) {
+      response.findings.push(finding(
+        "MULTISIG_SINGLE_SIGNER_THRESHOLD",
+        "Multisig has a single-signer approval threshold",
+        "high",
+        "present",
+        "The controlling Squads multisig requires only 1 signature to approve transactions. Any individual signer can authorize program upgrades unilaterally.",
+        `threshold=1; members=${resolved.multisigMemberCount ?? "unknown"}`,
+        `Controlling multisig=${authority}; threshold=1.`,
+        "Increase the approval threshold to at least 2 or a majority of signers to avoid a single point of failure.",
+        authority,
+        ["Individual signer keys and voting workflows are managed on-chain by Squads."],
+        authorityType,
+        "multisig-posture"
+      ));
+    }
   } else {
     response.result = "unsupported";
     response.summary = "The ProgramData authority field contained an unexpected option value or truncated data.";
     response.warnings.push("No authority conclusion was made.");
   }
 
+  response.graph = buildAuthorityControlGraph(response);
+  response.policy = evaluatePolicy(response);
   response.observedAt = new Date().toISOString();
   return response;
 }
@@ -244,10 +290,13 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
   const info = preFetchedInfo || await getAccountInfoWithTimeout(connection, key);
 
   if (!info) {
+    const response = baseResponse(address, "mint");
     response.kind = "unknown";
     response.result = "unsupported";
     response.summary = "No account was found for this address on the configured cluster.";
     response.warnings.push("Verify the address and selected cluster.");
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -260,6 +309,8 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
     response.result = "unsupported";
     response.summary = "The account is not owned by the classic SPL Token or Token-2022 program.";
     response.warnings.push(`Observed account owner: ${info.owner.toBase58()}`);
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -270,6 +321,8 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
     response.result = "unsupported";
     response.summary = "The provided address appears to be a token account, not a mint account.";
     response.warnings.push("Token accounts are not supported by the mint analysis endpoint.");
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -282,6 +335,8 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
     response.result = "unsupported";
     response.summary = "The token account could not be decoded as a supported mint.";
     response.warnings.push("The address data did not match the expected mint layout.");
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -312,7 +367,10 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
 
       // Generate findings from extensions
       const extFindings = extensionsToFindings(extensions, address);
-      extFindings.forEach(f => response.findings.push(f));
+      extFindings.forEach(f => {
+        f.category = "extension-risk";
+        response.findings.push(f);
+      });
 
       // Report any extensions that were detected but not fully parsed
       const unparsedExts = extensions.filter(e => e.parseStatus !== "parsed");
@@ -356,7 +414,8 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
       : "Keep evidence of the revoked authority with the token's launch documentation.",
     address,
     undefined,
-    mintAuthorityType
+    mintAuthorityType,
+    "mint-authority"
   ));
 
   response.findings.push(finding(
@@ -375,9 +434,12 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
       : "Record the current authority state and recheck it after relevant governance changes.",
     address,
     undefined,
-    freezeAuthorityType
+    freezeAuthorityType,
+    "freeze-authority"
   ));
 
+  response.graph = buildAuthorityControlGraph(response);
+  response.policy = evaluatePolicy(response);
   response.observedAt = new Date().toISOString();
   return response;
 }
@@ -394,6 +456,8 @@ export async function analyzeAddress(address: string, kind: "auto" | "program" |
     const response = baseResponse(key.toBase58(), "unknown");
     response.result = "unsupported";
     response.summary = "No account was found for this address on the configured cluster.";
+    response.graph = buildAuthorityControlGraph(response);
+    response.policy = evaluatePolicy(response);
     response.observedAt = new Date().toISOString();
     return response;
   }
@@ -407,6 +471,8 @@ export async function analyzeAddress(address: string, kind: "auto" | "program" |
   response.result = "unsupported";
   response.summary = "This account type is not supported by the current MVP.";
   response.warnings.push(`Observed account owner: ${info.owner.toBase58()}`);
+  response.graph = buildAuthorityControlGraph(response);
+  response.policy = evaluatePolicy(response);
   response.observedAt = new Date().toISOString();
   return response;
 }

@@ -27,12 +27,20 @@ const limiter = rateLimit({
     });
   }
 });
+import { defaultSnapshotStore } from "./snapshot-store.js";
+import { evaluatePolicy, DEFAULT_BASELINE_POLICY } from "./policy-engine.js";
+import type { SecurityPolicy, AnalysisResponse } from "./types.js";
+
+// Rate limiting applies to analyze and evaluation endpoints
 app.use("/api/analyze", limiter);
+app.use("/api/compare", limiter);
 
 const analyzeSchema = z.object({
   address: z.string().trim().min(32).max(44),
   kind: z.enum(["auto", "program", "mint"]).default("auto")
 });
+
+const addressParamSchema = z.string().trim().min(32).max(44);
 
 // ── Request Logging (audit finding F-9)
 app.use((req, res, next) => {
@@ -103,6 +111,14 @@ app.post("/api/analyze", async (req, res) => {
 
   try {
     const result = await analyzeAddress(parsed.data.address, parsed.data.kind);
+
+    // Persist snapshot on analysis
+    try {
+      defaultSnapshotStore.saveSnapshot(result);
+    } catch (saveErr) {
+      console.warn("[SnapshotStore] Error saving snapshot:", saveErr);
+    }
+
     if (!res.headersSent) res.json(result);
   } catch (error) {
     if (res.headersSent) return;
@@ -113,6 +129,143 @@ app.post("/api/analyze", async (req, res) => {
       message: isAddressError
         ? "The address could not be parsed as a Solana public key."
         : "The analysis could not be completed. The RPC provider may be unavailable or rate-limited."
+    });
+  }
+});
+
+// ── Historical Snapshots Endpoints (Feature Four)
+app.get("/api/snapshots/:address", (req, res) => {
+  const addressParam = addressParamSchema.safeParse(req.params.address);
+  if (!addressParam.success) {
+    res.status(400).json({
+      error: "INVALID_ADDRESS",
+      message: "Address parameter must be a 32-44 character base58 string."
+    });
+    return;
+  }
+
+  const snapshots = defaultSnapshotStore.getSnapshots(addressParam.data);
+  res.json({
+    address: addressParam.data,
+    count: snapshots.length,
+    snapshots
+  });
+});
+
+app.get("/api/snapshots/:address/history", (req, res) => {
+  const addressParam = addressParamSchema.safeParse(req.params.address);
+  if (!addressParam.success) {
+    res.status(400).json({
+      error: "INVALID_ADDRESS",
+      message: "Address parameter must be a 32-44 character base58 string."
+    });
+    return;
+  }
+
+  const snapshots = defaultSnapshotStore.getSnapshots(addressParam.data);
+  if (snapshots.length < 2) {
+    res.json({
+      address: addressParam.data,
+      count: snapshots.length,
+      hasHistory: false,
+      comparisons: [],
+      allChanges: []
+    });
+    return;
+  }
+
+  const comparisons = [];
+  const allChanges = [];
+
+  for (let i = 1; i < snapshots.length; i++) {
+    const prev = snapshots[i - 1];
+    const curr = snapshots[i];
+    const comparison = defaultSnapshotStore.compare(prev, curr);
+    comparisons.push(comparison);
+    allChanges.push(...comparison.changes);
+  }
+
+  res.json({
+    address: addressParam.data,
+    count: snapshots.length,
+    hasHistory: true,
+    comparisons,
+    allChanges
+  });
+});
+
+// ── Snapshot Comparison Endpoint (Feature Four)
+app.post("/api/compare", (req, res) => {
+  const { previousSnapshot, currentSnapshot, address } = req.body || {};
+
+  if (previousSnapshot && currentSnapshot) {
+    try {
+      const comparison = defaultSnapshotStore.compare(previousSnapshot, currentSnapshot);
+      res.json(comparison);
+      return;
+    } catch {
+      res.status(400).json({
+        error: "INVALID_SNAPSHOTS",
+        message: "Invalid snapshot objects provided for comparison."
+      });
+      return;
+    }
+  }
+
+  if (address) {
+    const valid = addressParamSchema.safeParse(address);
+    if (!valid.success) {
+      res.status(400).json({
+        error: "INVALID_ADDRESS",
+        message: "Address must be a valid Solana public key string."
+      });
+      return;
+    }
+
+    const snaps = defaultSnapshotStore.getSnapshots(valid.data);
+    if (snaps.length < 2) {
+      res.status(404).json({
+        error: "INSUFFICIENT_SNAPSHOTS",
+        message: `Fewer than 2 snapshots found for address ${valid.data}. Run an analysis first to generate historical records.`
+      });
+      return;
+    }
+
+    const prev = snaps[snaps.length - 2];
+    const curr = snaps[snaps.length - 1];
+    const comparison = defaultSnapshotStore.compare(prev, curr);
+    res.json(comparison);
+    return;
+  }
+
+  res.status(400).json({
+    error: "INVALID_REQUEST",
+    message: "Provide either { previousSnapshot, currentSnapshot } or an { address } with stored history."
+  });
+});
+
+// ── Policy Evaluation Endpoint (Feature Five)
+app.post("/api/policy/evaluate", (req, res) => {
+  const { analysis, policy } = req.body || {};
+
+  if (!analysis || typeof analysis !== "object" || !analysis.address) {
+    res.status(400).json({
+      error: "INVALID_REQUEST",
+      message: "Provide a valid AnalysisResponse object to evaluate."
+    });
+    return;
+  }
+
+  try {
+    const evaluation = evaluatePolicy(
+      analysis as AnalysisResponse,
+      (policy as SecurityPolicy) || DEFAULT_BASELINE_POLICY
+    );
+    res.json(evaluation);
+  } catch (err) {
+    res.status(500).json({
+      error: "EVALUATION_FAILED",
+      message: err instanceof Error ? err.message : "Policy evaluation failed"
     });
   }
 });

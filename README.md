@@ -169,15 +169,29 @@ Every feature listed below is verified against the current repository implementa
   - *What it does:* Decodes the freeze authority option and address from SPL Token and Token-2022 mint accounts.
   - *Why it matters:* Identifies whether an administrative key can freeze token accounts, preventing transfers and trading.
   - *Evidence produced:* Returns `freezeAuthority` pubkey (or `null` if revoked) and token program identity.
+- **Token-2022 Full Extension TLV Analyzer:**
+  - *What it does:* Scans the Type-Length-Value (TLV) extension buffer beyond byte 165 for Token-2022 mint accounts. Fully decodes `PermanentDelegate` (type #13), `DefaultAccountState` (type #4), `TransferHook` (type #14), `TransferFeeConfig` (type #1), `MintCloseAuthority` (type #2), `InterestBearingConfig` (type #10), and `NonTransferable` (type #9).
+  - *Why it matters:* Identifies high-risk privileges (e.g. permanent delegates able to seize holder tokens without signature) that standard SPL Token tools miss entirely.
+  - *Evidence produced:* Returns decoded extension fields, authority pubkeys, fees in basis points, and specific findings.
+- **Effective Authority Resolver & Squads Multisig Adapter:**
+  - *What it does:* Analyzes authority accounts to determine their controlling nature: direct keypair (`direct-key`), recognized Squads multisig (`squads-multisig`), unknown program-owned (`unknown-program-owned`), or unresolved. Automatically identifies Squads v3 & v4 multisigs using on-chain account discriminators and Borsh layouts, decoding approval threshold and member count.
+  - *Why it matters:* Discloses whether an upgrade or mint authority is a single hot key or a decentralized multisig, and flags dangerous 1-of-N threshold configurations.
+  - *Evidence produced:* Returns `authorityType`, `multisigThreshold`, `multisigMemberCount`, and controlling program ID.
+- **Directed Authority Control Graph:**
+  - *What it does:* Constructs a normalized directed graph linking the target asset to its upgrade authorities, mint/freeze authorities, Token-2022 delegates, and controlling multisigs. Rendered interactively in the web dashboard.
+  - *Why it matters:* Visualizes administrative flow and multi-hop governance at a glance.
+- **Security Policy & Configuration Drift Engine:**
+  - *What it does:* Evaluates on-chain configurations against configurable security policies with explicit `PASS`, `FAIL`, `UNKNOWN`, and `NOT_APPLICABLE` states.
+  - *Why it matters:* Automates compliance checks against rules like "must be immutable", "multisig threshold >= 2", "no permanent delegate", and "whitelisted upgrade authorities".
+- **Historical Snapshots & Change Detection:**
+  - *What it does:* Persists observation snapshots with deterministic SHA-256 state hashes, compares historical configurations, and detects events: authority handovers, immutability transitions, threshold adjustments, and extension modifications.
+  - *Why it matters:* Enables monitoring and alerting on administrative drift over time.
 - **Fail-Closed Account Type Guarding:**
   - *What it does:* Enforces strict account validation: rejects non-base58 inputs, flags non-executable accounts submitted as programs, and rejects 165-byte token accounts submitted to the mint endpoint.
   - *Why it matters:* Prevents silent misinterpretation of user token accounts as mints or non-executable accounts as contracts.
-  - *Evidence produced:* Emits structured `unsupported` responses with observed account owners and explicit warnings.
-- **Token-2022 Transparency & Extension Warnings:**
-  - *What it does:* Decodes base mint fields (mint authority, freeze authority) for Token-2022 mints while appending an explicit warning regarding undecoded extensions.
-  - *Why it matters:* Informs the user that extensions such as `PermanentDelegate`, `TransferHook`, or `DefaultAccountState` are outside the MVP scope and must be inspected separately.
-  - *Evidence produced:* Appends explicit diagnostic warnings to the `warnings` array in the response schema.
 - **Zero-Dependency Security (Vulnerability Elimination):**
+  - *What it does:* Operates with zero transitive CVEs by replacing high-vulnerability packages with clean, audited in-tree binary decoders.
+  - *Status:* `npm audit` reports **0 vulnerabilities**.
   - *What it does:* Uses an in-tree binary buffer decoder (`MintLayout`) rather than importing `@solana/spl-token`.
   - *Why it matters:* Eliminates transitive CVEs from outdated packages (`stream-json`, `uuid`) and resolves cross-version `@solana/web3.js` `PublicKey` compatibility crashes.
   - *Evidence produced:* Verified by `npm audit` reporting 0 vulnerabilities and 25 dedicated decoder unit tests.
@@ -694,9 +708,75 @@ Returns an `AnalysisResponse` JSON object with HTTP `200 OK` (even when `result`
 
 ---
 
+### GET `/api/snapshots/:address`
+
+Retrieves historical observation snapshots for an address.
+
+- **Method:** `GET`
+- **Params:** `address` (32 to 44 base58 characters)
+- **Response Format:**
+  ```json
+  {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "count": 2,
+    "snapshots": [...]
+  }
+  ```
+
+---
+
+### GET `/api/snapshots/:address/history`
+
+Retrieves configuration drift timeline and detected change events across sequential snapshots.
+
+- **Method:** `GET`
+- **Params:** `address`
+- **Response Format:**
+  ```json
+  {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "count": 2,
+    "hasHistory": true,
+    "comparisons": [...],
+    "allChanges": [
+      {
+        "type": "AUTHORITY_REMOVED",
+        "field": "freezeAuthority",
+        "previousValue": "7C4gPZNV9uqXZTahBamhkvSmCrqmAipj2RnvPNTitCqd",
+        "currentValue": null,
+        "severity": "info",
+        "description": "Freeze authority was revoked.",
+        "timestamp": "2026-10-11T12:00:00.000Z"
+      }
+    ]
+  }
+  ```
+
+---
+
+### POST `/api/compare`
+
+Compares two arbitrary snapshots or two recent observations for an address.
+
+- **Method:** `POST`
+- **Body:** `{ "previousSnapshot": {...}, "currentSnapshot": {...} }` or `{ "address": "..." }`
+- **Response Format:** Returns a `SnapshotComparison` object with `hasChanges: boolean` and `changes: ChangeEvent[]`.
+
+---
+
+### POST `/api/policy/evaluate`
+
+Evaluates an `AnalysisResponse` against a configured security policy (e.g. baseline or strict immutability).
+
+- **Method:** `POST`
+- **Body:** `{ "analysis": {...}, "policy": {...} }`
+- **Response Format:** Returns a `PolicyEvaluation` object with overall `status: "PASS" | "FAIL" | "UNKNOWN"`, rule results, reasons, and evidence.
+
+---
+
 ### Rate Limiting and Timeouts
 
-- **Rate Limit:** Guarded by `express-rate-limit`. Requests to `/api/analyze` are capped at **30 requests per IP per minute**. Exceeding this returns HTTP `429 Too Many Requests`:
+- **Rate Limit:** Guarded by `express-rate-limit`. Requests to `/api/analyze` and `/api/compare` are capped at **30 requests per IP per minute**. Exceeding this returns HTTP `429 Too Many Requests`:
   ```json
   {
     "error": "RATE_LIMITED",
@@ -733,29 +813,60 @@ AuthorityGraph enforces strict quality gates across both workspaces. All test su
 
 ### Verified Test Coverage
 
-The repository maintains **38 automated tests** across 3 test suites:
+The repository maintains **98 automated tests** across 9 test suites:
 
-1. **Decoder & Layout Unit Tests (`apps/api/src/solana.test.ts` — 25 tests):**
+1. **Token-2022 Extension TLV Parser Tests (`apps/api/src/token2022.test.ts` — 30 tests):**
+   - TLV header parsing, extension bounds validation, empty account handling, and truncation guards.
+   - Decoders for `PermanentDelegate`, `DefaultAccountState`, `TransferHook`, `TransferFeeConfig`, `MintCloseAuthority`, `InterestBearingConfig`, and `NonTransferable`.
+2. **Decoder & Layout Unit Tests (`apps/api/src/solana.test.ts` — 25 tests):**
    - Buffer conversion & LE integer read verification (`readUInt32LE`, `readBigUInt64LE`).
    - Loader v3 `Program` layout enum tag `2` and `ProgramData` address extraction.
    - Loader v3 `ProgramData` enum tag `3`, deployment slot, and `Option<Pubkey>` authority parsing.
    - Fail-closed behavior on truncated buffers (< 36 bytes for Program, < 13 bytes for ProgramData, truncated authority option).
    - In-tree 82-byte `MintLayout` decoder: active vs. revoked mint authorities, active vs. revoked freeze authorities, supply decoding, and decimal precision.
    - Cross-version `@solana/web3.js` `PublicKey.equals()` equality checks.
-2. **Analyzer Integration Tests (`apps/api/src/integration.test.ts` — 7 tests):**
-   - Handling missing accounts (`null` RPC response -> `unsupported`).
-   - Program analysis with active upgrade authority via mocked RPC.
-   - Valid mint account analysis.
-   - 165-byte token account rejection guard.
-   - Token-2022 mint analysis with extension caveat warning validation.
-   - RPC timeout propagation.
-   - Auto-detection routing without redundant RPC round-trips.
-3. **HTTP Server Integration Tests (`apps/api/src/server.test.ts` — 6 tests):**
+3. **Authority Resolver Tests (`apps/api/src/authority-resolver.test.ts` — 10 tests):**
+   - System Program direct-key resolution.
+   - Squads v3 & v4 multisig discriminator matching and threshold/member layout parsing.
+   - Unknown program-owned account classification and uninitialized account handling.
+   - Bounded RPC call timeout propagation.
+4. **HTTP Server Integration Tests (`apps/api/src/server.test.ts` — 10 tests):**
    - `GET /api/health` success with mocked `getBlockHeight`.
    - `POST /api/analyze` 400 rejection on short/malformed address.
    - `POST /api/analyze` handling of invalid public key bytes.
    - `POST /api/analyze` response structure on non-existent accounts.
    - `POST /api/analyze` 502 handling on upstream RPC failure without leaking internal stack traces.
+   - `GET /api/snapshots/:address` history retrieval and 400 validation.
+   - `POST /api/policy/evaluate` custom policy evaluation.
+   - `POST /api/compare` invalid request handling.
+5. **Analyzer Integration Tests (`apps/api/src/integration.test.ts` — 7 tests):**
+   - Handling missing accounts (`null` RPC response -> `unsupported`).
+   - Program analysis with active upgrade authority via mocked RPC.
+   - Valid mint account analysis.
+   - 165-byte token account rejection guard.
+   - Token-2022 mint analysis with extension findings.
+   - RPC timeout propagation.
+   - Auto-detection routing without redundant RPC round-trips.
+6. **Security Policy Engine Tests (`apps/api/src/policy-engine.test.ts` — 6 tests):**
+   - Immutable program PASS under strict immutability.
+   - Upgradeable program FAIL under strict immutability.
+   - Whitelisted upgrade authority compliance.
+   - Token-2022 PermanentDelegate violation detection.
+   - Squads multisig threshold rule compliance (threshold >= 2 vs threshold = 1).
+   - Inconclusive results returning UNKNOWN state.
+7. **Snapshot Store & Drift Tests (`apps/api/src/snapshot-store.test.ts` — 5 tests):**
+   - Deterministic SHA-256 state hashing.
+   - Persistence and deduplication of unchanged snapshots.
+   - Freeze authority revocation change detection (`AUTHORITY_REMOVED`).
+   - Program immutability transition detection (`PROGRAM_IMMUTABILITY_CHANGED`).
+   - Multisig threshold adjustment detection (`MULTISIG_THRESHOLD_CHANGED`).
+8. **Authority Control Graph Tests (`apps/api/src/graph-builder.test.ts` — 3 tests):**
+   - Directed graph construction for upgradeable programs.
+   - Graph construction for tokens with mint, freeze, and extension authorities.
+   - Graph construction for immutable programs without dangling edges.
+9. **Web Data Models & Contract Tests (`apps/web/src/app.test.ts` — 2 tests):**
+   - Frontend `AnalysisResponse` type contract validation.
+   - Token-2022 extension structures in frontend models.
 
 ### Running the Verification Commands
 
@@ -774,9 +885,9 @@ npm audit
 ```
 
 *Observed verification status:*
-- `npm run typecheck`: **Exit 0** (Zero errors)
-- `npm run test`: **Exit 0** (38/38 tests passing)
-- `npm run build`: **Exit 0** (Vite bundle: 170.9 kB JS, 26.6 kB CSS)
+- `npm run typecheck`: **Exit 0** (Zero errors across API and Web)
+- `npm run test`: **Exit 0** (98/98 tests passing: 96 in @authoritygraph/api, 2 in @authoritygraph/web)
+- `npm run build`: **Exit 0** (API: tsc compiled; Web: Vite bundle ~190 kB JS, ~34 kB CSS)
 - `npm audit`: **0 vulnerabilities**
 
 ---

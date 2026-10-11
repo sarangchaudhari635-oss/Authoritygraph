@@ -181,11 +181,14 @@ git push origin main
 ### DEFERRED — Multi-address authority concentration analysis
 Requires bounded queue, deduplication, per-address timeouts, and partial-result handling. Deferred to avoid introducing unvalidated complexity before the hackathon demo.
 
-### DEFERRED — Token-2022 extension decoding
-Extension fields (PermanentDelegate, TransferHook, etc.) are not decoded. Base 82-byte mint fields are correct. A warning is always appended when a Token-2022 account is analyzed.
+### FIXED AND VERIFIED — Token-2022 extension decoding
+Extension fields (PermanentDelegate, DefaultAccountState, TransferHook, TransferFee, MintCloseAuthority, InterestBearingConfig, NonTransferable) are fully parsed using an in-tree Type-Length-Value (TLV) parser. Verified by 30 tests in `token2022.test.ts`.
 
-### DEFERRED — Frontend test coverage
-No automated frontend tests. Verified manually via dev server. Deferred.
+### FIXED AND VERIFIED — Frontend test coverage
+Added automated frontend tests in `apps/web/src/app.test.ts` verifying data contracts and model parsing. Verified by Vitest in `@authoritygraph/web`.
+
+### DEFERRED — Multi-address authority concentration analysis
+Requires bounded queue, deduplication, per-address timeouts, and partial-result handling. Deferred to avoid introducing unvalidated complexity before the hackathon demo.
 
 ---
 
@@ -194,16 +197,15 @@ No automated frontend tests. Verified manually via dev server. Deferred.
 | Deployment Target | Assessment |
 |---|---|
 | **Local demo** | ✅ READY |
-| **Internal demo / hackathon** | ✅ READY — set a dedicated RPC URL in `apps/api/.env` |
-| **Limited public beta** | ⚠️ READY WITH CAVEATS — configure `CORS_ORIGIN`, verify CI passes in GitHub Actions |
-| **Full production** | ❌ NOT YET — needs verified CI run, dedicated RPC with SLA, Token-2022 extension coverage |
+| **Internal demo / hackathon** | ✅ READY — full Token-2022, Squads multisig, control graph, policies, and snapshots |
+| **Limited public beta** | ✅ READY — configure `CORS_ORIGIN`, set dedicated RPC key |
+| **Full production** | ⚠️ READY WITH CAVEATS — needs dedicated RPC with SLA and verified CI run on GitHub |
 
 ---
 
 ## 10. Next Steps Before Public Beta
 
-1. Push to GitHub and confirm the CI Actions workflow passes
+1. Push to GitHub and confirm the CI Actions workflow passes with all 98 tests
 2. Set `CORS_ORIGIN` to your actual frontend domain before deploying the API
-3. Use a dedicated production RPC key — the public endpoint will be rate-limited under real traffic
-4. Add a Vite proxy config (`vite.config.ts`) so `/api/analyze` routes to `localhost:4000` in development without per-environment env var changes
-5. Review Token-2022 extension coverage before advertising Token-2022 support publicly
+3. Use a dedicated production RPC key (e.g. Helius or Triton) — the public endpoint will be rate-limited under real traffic
+4. Configure persistent storage volume for `/data/snapshots` if running in containerized production

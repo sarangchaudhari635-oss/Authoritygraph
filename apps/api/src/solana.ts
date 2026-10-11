@@ -4,8 +4,10 @@ import {
   PublicKey,
   AccountInfo
 } from "@solana/web3.js";
-import type { Finding, AnalysisResponse } from "./types.js";
+import type { Finding, AnalysisResponse, AuthorityType } from "./types.js";
 import { config } from "./config.js";
+import { parseToken2022Extensions, extensionsToFindings } from "./token2022.js";
+import { resolveAuthority } from "./authority-resolver.js";
 
 // ── Program IDs constructed from web3.js v3 PublicKey (not spl-token's bundled v1 copy)
 // This avoids the cross-version PublicKey.equals() crash (audit finding B-2).
@@ -73,10 +75,11 @@ function finding(
   detail: string,
   recommendation: string,
   accountAddress?: string,
-  limitations?: string[]
+  limitations?: string[],
+  authorityType?: AuthorityType
 ): Finding {
   return {
-    id, title, severity, status, summary, recommendation, limitations,
+    id, title, severity, status, summary, recommendation, limitations, authorityType,
     evidence: [{
       source: "Solana RPC account data",
       accountAddress,
@@ -191,14 +194,38 @@ export async function analyzeProgram(address: string, preFetchedInfo?: AccountIn
     ));
   } else if (optionTag === 1 && pdData.length >= 45) {
     const authority = decodePubkey(pdData, 13);
+
+    // Resolve authority type (1 extra RPC call, bounded by timeout)
+    let authorityType: AuthorityType = "unresolved";
+    const resolved = await resolveAuthority(authority, connection, config.requestTimeoutMs);
+    authorityType = resolved.authorityType;
+
+    // Build enriched limitation list including resolution evidence
+    const limitations = [
+      `Authority resolution: ${resolved.evidence}`,
+      ...resolved.limitations
+    ];
+
+    // Adjust finding detail and title based on authority type
+    let detail = `ProgramData=${programDataAddress}; deploymentSlot=${deploymentSlot}; authorityType=${authorityType}.`;
+    let title = "Program has an active upgrade authority";
+    if (authorityType === "squads-multisig") {
+      title = "Program upgrade authority is a Squads multisig";
+      if (resolved.multisigThreshold !== undefined) {
+        detail += ` Squads threshold=${resolved.multisigThreshold}` +
+          (resolved.multisigMemberCount !== undefined ? `; members=${resolved.multisigMemberCount}` : "") + ".";
+      }
+    }
+
     response.findings.push(finding(
-      "PROGRAM_UPGRADE_AUTHORITY_ACTIVE", "Program has an active upgrade authority", "high", "present",
+      "PROGRAM_UPGRADE_AUTHORITY_ACTIVE", title, "high", "present",
       "An address is recorded as the authority able to upgrade this program under the decoded loader layout.",
       authority,
-      `ProgramData=${programDataAddress}; deploymentSlot=${deploymentSlot}; direct authority only.`,
+      detail,
       "Verify the authority's custody, approval policy, recovery process, and whether the trust model is documented.",
       programDataAddress,
-      ["This does not determine who controls the key or whether it is protected by a multisig."]
+      limitations,
+      authorityType
     ));
   } else {
     response.result = "unsupported";
@@ -270,12 +297,47 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
   const { decimals } = decoded;
 
   if (isToken2022) {
-    response.warnings.push(
-      "This account uses the Token-2022 program. Extensions such as PermanentDelegate, " +
-      "TransferHook, DefaultAccountState, InterestBearingConfig, and others are NOT decoded by this MVP. " +
-      "The findings below reflect base mint fields (mint authority, freeze authority) only. " +
-      "Review on-chain extension data independently before making security judgements."
-    );
+    // Parse Token-2022 extensions from account data
+    const { extensions, warnings: extWarnings } = parseToken2022Extensions(info.data);
+    extWarnings.forEach(w => response.warnings.push(w));
+
+    if (extensions.length === 0) {
+      response.warnings.push(
+        "This Token-2022 account has no extensions detected after the base 82-byte mint layout. " +
+        "The account may have no extensions configured, or the data may be shorter than expected."
+      );
+    } else {
+      // Attach extensions to response for transparency
+      response.extensions = extensions;
+
+      // Generate findings from extensions
+      const extFindings = extensionsToFindings(extensions, address);
+      extFindings.forEach(f => response.findings.push(f));
+
+      // Report any extensions that were detected but not fully parsed
+      const unparsedExts = extensions.filter(e => e.parseStatus !== "parsed");
+      if (unparsedExts.length > 0) {
+        response.warnings.push(
+          `${unparsedExts.length} Token-2022 extension(s) were detected but not fully parsed: ` +
+          unparsedExts.map(e => e.name).join(", ") +
+          ". These extensions may carry security implications not reflected in the findings above."
+        );
+      }
+    }
+  }
+
+  // Resolve mint authority type
+  let mintAuthorityType: AuthorityType | undefined;
+  if (mintAuthorityPubkey) {
+    const resolved = await resolveAuthority(mintAuthorityPubkey, connection, config.requestTimeoutMs);
+    mintAuthorityType = resolved.authorityType;
+  }
+
+  // Resolve freeze authority type
+  let freezeAuthorityType: AuthorityType | undefined;
+  if (freezeAuthorityPubkey) {
+    const resolved = await resolveAuthority(freezeAuthorityPubkey, connection, config.requestTimeoutMs);
+    freezeAuthorityType = resolved.authorityType;
   }
 
   response.findings.push(finding(
@@ -287,11 +349,14 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
       ? "An address is recorded as able to mint additional tokens."
       : "No mint authority is recorded in the decoded mint state.",
     mintAuthorityPubkey ?? "null",
-    `Token program=${tokenProgram}; decimals=${decimals}; supply=${supply}.`,
+    `Token program=${tokenProgram}; decimals=${decimals}; supply=${supply}` +
+      (mintAuthorityType ? `; authorityType=${mintAuthorityType}` : "") + ".",
     mintAuthorityPubkey
       ? "Confirm whether ongoing issuance is intended and document the authority's custody and approval controls."
       : "Keep evidence of the revoked authority with the token's launch documentation.",
-    address
+    address,
+    undefined,
+    mintAuthorityType
   ));
 
   response.findings.push(finding(
@@ -303,11 +368,14 @@ export async function analyzeMint(address: string, preFetchedInfo?: AccountInfo<
       ? "An address is recorded as able to freeze token accounts under the supported token program."
       : "No freeze authority is recorded in the decoded mint state.",
     freezeAuthorityPubkey ?? "null",
-    `Token program=${tokenProgram}.`,
+    `Token program=${tokenProgram}` +
+      (freezeAuthorityType ? `; authorityType=${freezeAuthorityType}` : "") + ".",
     freezeAuthorityPubkey
       ? "Confirm the operational and legal purpose of freezing, and disclose the policy to token holders."
       : "Record the current authority state and recheck it after relevant governance changes.",
-    address
+    address,
+    undefined,
+    freezeAuthorityType
   ));
 
   response.observedAt = new Date().toISOString();
